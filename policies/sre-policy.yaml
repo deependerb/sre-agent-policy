@@ -144,3 +144,5 @@ reporting:
   - Which specialist was assigned, and what it did.
   - Any handoff that happened, and the reason for it.
   - The final state of the resource.
+
+# SYNC-TEST-MARKER 1
