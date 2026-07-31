@@ -35,7 +35,7 @@
 #   Everything else - rule names, summaries, prose - is free text.
 # =============================================================================
 
-version: 5
+version: 6
 lastUpdated: "2026-07-31"
 owner: platform-sre@contoso.com
 
@@ -82,14 +82,13 @@ rules:
 
   - name: development-vm-stopped
     summary: >-
-      Dev machines are often shut down on purpose to save money.
-      Never start one automatically - find out who stopped it and tell a human.
+      Dev machines should be started. 
     match:
       resource: Virtual machine
       environment: development
       condition: The VM is stopped or deallocated
-    action: investigate_only
-    assignTo: investigation-specialist
+    action: auto_remediate
+    assignTo: vm-recovery-specialist
 
   - name: production-service-stopped
     summary: A service that should be running has stopped on a production machine.
