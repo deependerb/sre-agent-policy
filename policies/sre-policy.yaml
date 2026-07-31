@@ -1,0 +1,146 @@
+# =============================================================================
+# SRE Agent Routing Policy
+# =============================================================================
+# THIS FILE DECIDES *WHEN* AND *WHO*. IT DOES NOT DECIDE *HOW*.
+#
+#   This file             ->  which specialist gets the incident, and whether
+#                             remediation is even allowed.
+#   The specialists       ->  who they are and what they may touch.
+#                             Defined in subagents/*.yaml. NOT in this file.
+#   The skills            ->  the step-by-step procedure for a failure mode.
+#                             Defined in skills/*/SKILL.md. NOT in this file.
+#
+# Keeping these three apart is deliberate. A service owner can change routing
+# here without ever being able to widen what a specialist is allowed to do.
+# That is a security boundary, not a style choice.
+#
+# HOW THIS FILE IS USED
+#   1. An incident arrives.
+#   2. The agent reads the affected resource's tags.
+#   3. It walks `rules` TOP TO BOTTOM and applies the FIRST one that matches.
+#   4. That rule names a specialist in `assignTo`. The agent hands the incident
+#      to that specialist. The specialist already knows how to do the job.
+#   5. If no rule matches, `defaults` applies - which never changes anything.
+#
+# TO SCALE
+#   New resource, same behaviour ...... change nothing. Just tag it.
+#   New routing decision .............. add a rule here.
+#   New kind of work .................. add a sub-agent in subagents/.
+#   New procedure for existing work ... add a skill in skills/.
+#
+# WORDS THAT MUST NOT BE RENAMED
+#   classification / tagKey / environments / rules / match / action /
+#   assignTo / thenHandOffTo / defaults / overrides / guardrails / reporting,
+#   and the two action values `auto_remediate` and `investigate_only`.
+#   Everything else - rule names, summaries, prose - is free text.
+# =============================================================================
+
+version: 4
+lastUpdated: "2026-07-30"
+owner: platform-sre@contoso.com
+
+# What to do when nothing below matches. Deliberately cautious.
+# This is what makes it safe to point this policy at an entire estate on day one:
+# anything you have not thought about yet is investigated, never touched.
+defaults:
+  action: investigate_only
+  assignTo: investigation-specialist
+  reason: Unknown or untagged resources are never changed automatically.
+
+# -----------------------------------------------------------------------------
+# How to work out which environment a resource belongs to.
+# This is the only thing that has to scale with the size of the estate, and it
+# scales by tag value - not by resource. 10 VMs or 10,000 VMs, same block.
+# -----------------------------------------------------------------------------
+classification:
+  tagKey: Environment
+  matching: Case-insensitive. If the tag is missing, treat the resource as unknown.
+  environments:
+    production:
+      values: [prod, production, prd]
+    development:
+      values: [dev, development, test, qa, uat]
+
+# -----------------------------------------------------------------------------
+# Rules - first match wins.
+# `assignTo` must name a sub-agent that exists in subagents/.
+# -----------------------------------------------------------------------------
+rules:
+
+  - name: production-vm-stopped
+    summary: Production is business critical. Bring it back immediately.
+    match:
+      resource: Virtual machine
+      environment: production
+      condition: The VM is stopped or deallocated
+    action: auto_remediate
+    assignTo: vm-recovery-specialist
+    thenHandOffTo: service-recovery-specialist
+    handoffReason: >-
+      Powering the machine on and confirming the applications inside it came
+      back are two different jobs, so they go to two different specialists.
+
+  - name: development-vm-stopped
+    summary: >-
+      Dev machines are often shut down on purpose to save money.
+      Never start one automatically - find out who stopped it and tell a human.
+    match:
+      resource: Virtual machine
+      environment: development
+      condition: The VM is stopped or deallocated
+    action: investigate_only
+    assignTo: investigation-specialist
+
+  - name: production-service-stopped
+    summary: A service that should be running has stopped on a production machine.
+    match:
+      resource: Virtual machine
+      environment: production
+      condition: An automatic Windows service is stopped
+      services: [IIS, Demo database service]
+    action: auto_remediate
+    assignTo: service-recovery-specialist
+    maxAttempts: 3
+
+  - name: production-high-resource-usage
+    summary: Sustained high CPU or memory on a production machine.
+    match:
+      resource: Virtual machine
+      environment: production
+      condition: CPU or memory has stayed above 95 percent for 15 minutes
+    action: auto_remediate
+    assignTo: performance-specialist
+
+# -----------------------------------------------------------------------------
+# Per-resource exceptions, without writing a rule per resource.
+# A resource carrying the tag below overrides whatever the rules above decided.
+# This is how you handle "that one server nobody is allowed to touch" across
+# thousands of machines without the policy file growing.
+# -----------------------------------------------------------------------------
+overrides:
+  tagKey: RemediationPolicy
+  values:
+    never:
+      action: investigate_only
+      assignTo: investigation-specialist
+      reason: The resource owner has opted out of automatic remediation.
+
+# -----------------------------------------------------------------------------
+# Always applies, whichever rule matched and whichever specialist is working.
+# -----------------------------------------------------------------------------
+guardrails:
+  - Never delete or remove any Azure resource.
+  - Never touch Key Vault.
+  - Only act on the resource the incident is about, and its contents.
+  - A specialist must stay inside its own job and hand back when done.
+  - Always verify the result after making a change.
+  - If this policy cannot be read, do nothing and say so.
+
+# -----------------------------------------------------------------------------
+# What every incident summary must say, so the audit trail is readable.
+# -----------------------------------------------------------------------------
+reporting:
+  - Which rule name matched, and why.
+  - Which specialist was assigned, and what it did.
+  - Any handoff that happened, and the reason for it.
+  - The final state of the resource.
