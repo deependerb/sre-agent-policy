@@ -1,0 +1,62 @@
+name: Apply policy to SRE Agent
+
+# Event-driven replacement for the */5 cron reconcile.
+# Fires only when the policy file changes on main (i.e. after PR approval+merge),
+# and only after a human approves the `policy-apply` environment gate.
+# Auth is GitHub OIDC federated to a user-assigned managed identity — no secret
+# is ever stored. The agent pulls the latest policy at run start, so this single
+# call both refreshes the workspace copy and reconciles state.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'policies/**'
+  workflow_dispatch: {}
+
+# Never let two policy applies overlap.
+concurrency:
+  group: sre-policy-apply
+  cancel-in-progress: false
+
+permissions:
+  id-token: write      # required for OIDC
+  contents: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: policy-apply   # required-reviewer gate = the "approved" step
+    steps:
+      - name: Azure login (OIDC, no stored secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Fire the SRE Agent reconcile trigger
+        env:
+          ENDPOINT: ${{ vars.SRE_AGENT_ENDPOINT }}
+          TRIGGER_ID: ${{ vars.SRE_TRIGGER_ID }}
+        run: |
+          set -euo pipefail
+          TOKEN=$(az account get-access-token --resource https://azuresre.dev --query accessToken -o tsv)
+          echo "Firing reconcile trigger ${TRIGGER_ID} ..."
+          HTTP=$(curl -sS -o resp.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{}' \
+            "${ENDPOINT}/api/v1/httptriggers/${TRIGGER_ID}/execute")
+          echo "HTTP ${HTTP}"
+          cat resp.json
+          echo
+          if [ "${HTTP}" != "200" ] && [ "${HTTP}" != "201" ]; then
+            echo "::error::Trigger call failed with HTTP ${HTTP}"
+            exit 1
+          fi
+          THREAD=$(python3 -c "import json,sys;d=json.load(open('resp.json'));print((d.get('execution') or {}).get('threadId',''))" || true)
+          echo "Started agent thread: ${THREAD}"
+          echo "### SRE reconcile fired" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Trigger: \`${TRIGGER_ID}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Thread: \`${THREAD}\`" >> "$GITHUB_STEP_SUMMARY"
