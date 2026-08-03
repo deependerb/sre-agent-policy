@@ -35,8 +35,8 @@
 #   Everything else - rule names, summaries, prose - is free text.
 # =============================================================================
 
-version: 6
-lastUpdated: "2026-07-31"
+version: 7
+lastUpdated: "2026-08-03"
 owner: platform-sre@contoso.com
 
 # What to do when nothing below matches. Deliberately cautious.
