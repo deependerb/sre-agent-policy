@@ -35,7 +35,7 @@
 #   Everything else - rule names, summaries, prose - is free text.
 # =============================================================================
 
-version: 7
+version: 8
 lastUpdated: "2026-08-03"
 owner: platform-sre@contoso.com
 

@@ -1,11 +1,14 @@
 name: Apply policy to SRE Agent
 
 # Event-driven replacement for the */5 cron reconcile.
-# Fires only when the policy file changes on main (i.e. after PR approval+merge),
-# and only after a human approves the `policy-apply` environment gate.
-# Auth is GitHub OIDC federated to a user-assigned managed identity — no secret
-# is ever stored. The agent pulls the latest policy at run start, so this single
-# call both refreshes the workspace copy and reconciles state.
+# Fires only when policies/** changes on main (after PR approval + merge), and
+# only after a human approves the `policy-apply` environment gate. Auth is GitHub
+# OIDC federated to a user-assigned managed identity - no secret is ever stored.
+#
+# The agent pulls the latest policy at run start, so a triggered run always reads
+# the just-committed file. This workflow additionally VERIFIES that: it reads the
+# version from the committed policy and fails loudly if the agent reports anything
+# else - so a silent stale read can never pass unnoticed.
 
 on:
   push:
@@ -14,20 +17,31 @@ on:
       - 'policies/**'
   workflow_dispatch: {}
 
-# Never let two policy applies overlap.
 concurrency:
   group: sre-policy-apply
   cancel-in-progress: false
 
 permissions:
-  id-token: write      # required for OIDC
+  id-token: write
   contents: read
 
 jobs:
   apply:
     runs-on: ubuntu-latest
-    environment: policy-apply   # required-reviewer gate = the "approved" step
+    environment: policy-apply
     steps:
+      - name: Checkout policy repo
+        uses: actions/checkout@v4
+
+      - name: Read expected policy version from the committed file
+        id: expected
+        run: |
+          set -euo pipefail
+          VER=$(grep -E '^version:' policies/sre-policy.yaml | head -1 | sed 's/version:[[:space:]]*//' | tr -d '"[:space:]')
+          test -n "$VER"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Expected committed policy version: $VER"
+
       - name: Azure login (OIDC, no stored secret)
         uses: azure/login@v2
         with:
@@ -35,28 +49,35 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Fire the SRE Agent reconcile trigger
+      - name: Fire reconcile and verify the agent read the committed version
         env:
           ENDPOINT: ${{ vars.SRE_AGENT_ENDPOINT }}
           TRIGGER_ID: ${{ vars.SRE_TRIGGER_ID }}
+          EXPECTED: ${{ steps.expected.outputs.version }}
         run: |
           set -euo pipefail
           TOKEN=$(az account get-access-token --resource https://azuresre.dev --query accessToken -o tsv)
-          echo "Firing reconcile trigger ${TRIGGER_ID} ..."
-          HTTP=$(curl -sS -o resp.json -w '%{http_code}' -X POST \
-            -H "Authorization: Bearer ${TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d '{}' \
-            "${ENDPOINT}/api/v1/httptriggers/${TRIGGER_ID}/execute")
-          echo "HTTP ${HTTP}"
-          cat resp.json
-          echo
-          if [ "${HTTP}" != "200" ] && [ "${HTTP}" != "201" ]; then
-            echo "::error::Trigger call failed with HTTP ${HTTP}"
-            exit 1
-          fi
-          THREAD=$(python3 -c "import json,sys;d=json.load(open('resp.json'));print((d.get('execution') or {}).get('threadId',''))" || true)
-          echo "Started agent thread: ${THREAD}"
-          echo "### SRE reconcile fired" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Trigger: \`${TRIGGER_ID}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Thread: \`${THREAD}\`" >> "$GITHUB_STEP_SUMMARY"
+
+          RESP=$(curl -sS -X POST -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" -d '{}' "${ENDPOINT}/api/v1/httptriggers/${TRIGGER_ID}/execute")
+          echo "Trigger response: ${RESP}"
+
+          THREAD=$(echo "${RESP}" | python3 -c "import json,sys; print((json.load(sys.stdin).get('execution') or {}).get('threadId',''))")
+          test -n "${THREAD}" || { echo "::error::No thread id returned by trigger"; exit 1; }
+          echo "Agent thread: ${THREAD}"
+
+          for i in $(seq 1 30); do
+            sleep 10
+            MSGS=$(curl -sS -H "Authorization: Bearer ${TOKEN}" "${ENDPOINT}/api/v1/threads/${THREAD}/messages")
+            READ_VER=$(echo "${MSGS}" | python3 -c "import json,sys,re; d=json.load(sys.stdin).get('value',[]); v=[re.search(r'Policy:\s*version\s*([0-9]+)', m.get('text') or '') for m in d]; v=[x.group(1) for x in v if x]; print(v[-1] if v else '')")
+            if [ -n "${READ_VER}" ]; then
+              echo "Agent reported policy version ${READ_VER} (expected ${EXPECTED})"
+              if [ "${READ_VER}" = "${EXPECTED}" ]; then
+                echo "### SRE agent read committed policy version ${READ_VER}" >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              echo "::error::STALE READ: agent read version ${READ_VER}, committed version is ${EXPECTED}"
+              exit 1
+            fi
+          done
+          echo "::error::Timed out waiting for the agent to report a policy version"
+          exit 1
