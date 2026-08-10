@@ -35,7 +35,7 @@
 #   Everything else - rule names, summaries, prose - is free text.
 # =============================================================================
 
-version: 12
+version: 13
 lastUpdated: "2026-08-10"
 owner: platform-sre@contoso.com
 
@@ -87,12 +87,11 @@ rules:
       resource: Virtual machine
       environment: development
       condition: The VM is stopped or deallocated
-     action: auto_remediate
-    assignTo: vm-recovery-specialist
+ action: investigate_only
+  assignTo: investigation-specialist
     thenHandOffTo: service-recovery-specialist
     handoffReason: >-
-      Powering the Dev machine on and confirming the applications inside it came
-      back are two different jobs, so they go to two different specialists.
+      Keep investigration only for Dev machines.
 
   - name: production-service-stopped
     summary: A service that should be running has stopped on a production machine.
